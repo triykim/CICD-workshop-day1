@@ -31,6 +31,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 echo '📦 Checking out source code from GitHub...'
+                echo 'Testing changes 😎😎😎😎😎😎😎😎😎🫠'
                 checkout scm
             }
         }
