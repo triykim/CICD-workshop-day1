@@ -1,0 +1,187 @@
+// Phase 5: Add Static Code Analysis
+// Goal: Check code quality using linters
+
+pipeline {
+    agent any
+    
+    triggers {
+        // Poll SCM every minute for changes
+        pollSCM('* * * * *')
+        // Or use GitHub webhook trigger (configure in Jenkins job settings)
+        // githubPush()
+    }
+    
+    environment {
+        PROJECT_NAME = 'GoWebApp'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        GO_VERSION = '1.21.5'
+        GOLANGCI_LINT_VERSION = '1.55.2'
+        GOPATH = "${WORKSPACE}/go"
+        PATH = "/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    }
+    
+    stages {
+        stage('Cleanup Workspace') {
+            steps {
+                echo '🧹 Cleaning workspace before build...'
+                deleteDir()
+                echo '✅ Workspace cleaned'
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                echo '📦 Checking out source code from GitHub...'
+                checkout scm
+            }
+        }
+        
+        stage('Setup Go Environment') {
+            steps {
+                echo '🔧 Setting up Go environment...'
+                sh '''
+                    if ! command -v go &> /dev/null; then
+                        ARCH=$(uname -m)
+                        case ${ARCH} in
+                            x86_64) GO_ARCH="amd64" ;;
+                            aarch64|arm64) GO_ARCH="arm64" ;;
+                            *) echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
+                        esac
+                        
+                        GO_TARBALL="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+                        GO_URL="https://go.dev/dl/${GO_TARBALL}"
+                        
+                        curl -fsSL -o ${GO_TARBALL} ${GO_URL}
+                        rm -rf /usr/local/go
+                        tar -C /usr/local -xzf ${GO_TARBALL}
+                        rm ${GO_TARBALL}
+                    fi
+                    
+                    go version
+                '''
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo '📥 Installing Go dependencies...'
+                sh '''
+                    go mod download
+                    go mod verify
+                '''
+            }
+        }
+        
+        stage('Static Code Analysis') {
+            steps {
+                echo '🔍 Running static code analysis...'
+                sh '''
+                    # Install golangci-lint if not present
+                    if ! command -v golangci-lint &> /dev/null; then
+                        echo "Installing golangci-lint ${GOLANGCI_LINT_VERSION}..."
+                        ARCH=$(uname -m)
+                        case ${ARCH} in
+                            x86_64) LINT_ARCH="amd64" ;;
+                            aarch64|arm64) LINT_ARCH="arm64" ;;
+                            *) echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
+                        esac
+                        
+                        LINT_URL="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${LINT_ARCH}.tar.gz"
+                        curl -fsSL -o golangci-lint.tar.gz ${LINT_URL}
+                        tar -xzf golangci-lint.tar.gz
+                        mkdir -p ${GOPATH}/bin
+                        mv golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${LINT_ARCH}/golangci-lint ${GOPATH}/bin/
+                        rm -rf golangci-lint*
+                    fi
+                    
+                    echo ""
+                    echo "Running linters..."
+                    golangci-lint --version
+                    
+                    # Run golangci-lint
+                    golangci-lint run --timeout 5m ./...
+                    
+                    echo ""
+                    echo "Running go vet..."
+                    go vet ./...
+                    
+                    echo ""
+                    echo "Running go fmt check..."
+                    UNFORMATTED=$(gofmt -l .)
+                    if [ -n "$UNFORMATTED" ]; then
+                        echo "❌ Unformatted files: $UNFORMATTED"
+                        exit 1
+                    fi
+                    
+                    echo "✅ All static analysis checks passed!"
+                '''
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo '🔨 Building Go application...'
+                sh '''
+                    mkdir -p bin
+                    
+                    COMMIT=$(git rev-parse --short HEAD)
+                    BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S_UTC')
+                    
+                    go build -v \
+                        -ldflags="-X main.version=1.0.${BUILD_NUMBER} -X main.commit=${COMMIT} -X main.buildTime=${BUILD_TIME}" \
+                        -o bin/${PROJECT_NAME} \
+                        ./cmd/webapp
+                    
+                    ls -lh bin/${PROJECT_NAME}
+                    echo "✅ Build completed successfully!"
+                '''
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                echo '🧪 Running tests...'
+                sh '''
+                    if ! command -v go-junit-report &> /dev/null; then
+                        go install github.com/jstemmer/go-junit-report/v2@latest
+                    fi
+                    
+                    mkdir -p test-reports
+                    
+                    # Run tests and capture output
+                    set +e
+                    go test -v -coverprofile=coverage.out -covermode=atomic ./... 2>&1 | tee test-output.txt
+                    TEST_EXIT=$?
+                    set -e
+                    
+                    # Generate JUnit report
+                    cat test-output.txt | go-junit-report -set-exit-code > test-reports/junit.xml
+                    
+                    # Generate HTML coverage report
+                    go tool cover -html=coverage.out -o coverage.html
+                    
+                    echo ""
+                    echo "📊 Coverage Summary:"
+                    go tool cover -func=coverage.out | tail -n 1
+                    
+                    exit ${TEST_EXIT}
+                '''
+            }
+            post {
+                always {
+                    junit 'test-reports/*.xml'
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+            echo "Build Number: ${BUILD_NUMBER}"
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+        }
+    }
+}

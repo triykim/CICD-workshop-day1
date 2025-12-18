@@ -1,0 +1,33 @@
+// Phase 1: Basic Git Checkout
+// Goal: Learn how to connect a Git repository to Jenkins
+
+pipeline {
+    agent any
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo '📦 Checking out source code from GitHub...'
+                checkout scm
+                
+                sh '''
+                    echo "Repository checked out successfully"
+                    echo "Current branch: $(git branch --show-current || echo 'detached HEAD')"
+                    echo "Commit: $(git rev-parse --short HEAD)"
+                    echo ""
+                    echo "Project structure:"
+                    ls -la
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+        }
+    }
+}

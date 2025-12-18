@@ -1,0 +1,41 @@
+# Gitignore for CI/CD Workshop
+
+# Binaries
+bin/
+artifacts/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test coverage
+*.out
+coverage.html
+
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Vagrant
+.vagrant/
+*.box
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Temporary files
+tmp/
+temp/

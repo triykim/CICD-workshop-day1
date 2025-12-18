@@ -1,0 +1,82 @@
+// Phase 2: Add Go Environment and Triggers
+// Goal: Set up Go environment for building and configure automated triggers
+
+pipeline {
+    agent any
+    
+    triggers {
+        // Poll SCM every minute for changes
+        pollSCM('* * * * *')
+        // Or use GitHub webhook trigger (configure in Jenkins job settings)
+        // githubPush()
+    }
+    
+    environment {
+        GO_VERSION = '1.21.5'
+        GOPATH = "${WORKSPACE}/go"
+        PATH = "/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo '📦 Checking out source code from GitHub...'
+                checkout scm
+                
+                sh '''
+                    echo "Repository checked out successfully"
+                    echo "Current branch: $(git branch --show-current || echo 'detached HEAD')"
+                    echo "Commit: $(git rev-parse --short HEAD)"
+                '''
+            }
+        }
+        
+        stage('Setup Go Environment') {
+            steps {
+                echo '🔧 Setting up Go environment...'
+                sh '''
+                    # Check if Go is installed
+                    if ! command -v go &> /dev/null; then
+                        echo "Installing Go ${GO_VERSION}..."
+                        
+                        # Detect architecture
+                        ARCH=$(uname -m)
+                        case ${ARCH} in
+                            x86_64) GO_ARCH="amd64" ;;
+                            aarch64|arm64) GO_ARCH="arm64" ;;
+                            *) echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
+                        esac
+                        
+                        echo "Detected architecture: ${ARCH} (Go: linux-${GO_ARCH})"
+                        
+                        # Download and install Go
+                        GO_TARBALL="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+                        GO_URL="https://go.dev/dl/${GO_TARBALL}"
+                        
+                        echo "Downloading from: ${GO_URL}"
+                        curl -fsSL -o ${GO_TARBALL} ${GO_URL}
+                        
+                        echo "Extracting..."
+                        rm -rf /usr/local/go
+                        tar -C /usr/local -xzf ${GO_TARBALL}
+                        rm ${GO_TARBALL}
+                    fi
+                    
+                    go version
+                    echo ""
+                    echo "Go environment:"
+                    go env GOPATH GOCACHE
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+        }
+    }
+}

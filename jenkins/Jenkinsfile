@@ -1,0 +1,304 @@
+pipeline {
+    agent any
+    
+    triggers {
+        // Poll SCM every minute for changes
+        pollSCM('* * * * *')
+        // Or use GitHub webhook trigger (configure in Jenkins job settings)
+        // githubPush()
+    }
+    
+    environment {
+        PROJECT_NAME = 'GoWebApp'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        GO_VERSION = '1.21.5'
+        GOLANGCI_LINT_VERSION = '1.55.2'
+        GOPATH = "${WORKSPACE}/go"
+        PATH = "/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+        
+        // GitHub configuration
+        GITHUB_REPO = 'epam-msdp/CICD-workshop-day1'
+    }
+    
+    stages {
+        stage('Cleanup Workspace') {
+            steps {
+                echo '🧹 Cleaning workspace before build...'
+                deleteDir()
+                echo '✅ Workspace cleaned'
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                echo '📦 Checking out source code from GitHub...'
+                checkout scm
+                
+                sh '''
+                    echo "Repository checked out successfully"
+                    echo "Current branch: $(git branch --show-current || echo 'detached HEAD')"
+                    echo "Commit: $(git rev-parse --short HEAD)"
+                    echo ""
+                    echo "Project structure:"
+                    ls -la
+                '''
+            }
+        }
+        
+        stage('Setup Go Environment') {
+            steps {
+                echo '🔧 Setting up Go environment...'
+                sh '''
+                    # Check if Go is installed
+                    if ! command -v go &> /dev/null; then
+                        echo "Installing Go ${GO_VERSION}..."
+                        
+                        # Detect architecture
+                        ARCH=$(uname -m)
+                        case ${ARCH} in
+                            x86_64) GO_ARCH="amd64" ;;
+                            aarch64|arm64) GO_ARCH="arm64" ;;
+                            *) echo "Unsupported architecture: ${ARCH}"; exit 1 ;;
+                        esac
+                        
+                        echo "Detected architecture: ${ARCH} (Go: linux-${GO_ARCH})"
+                        
+                        # Download and install Go
+                        GO_TARBALL="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+                        GO_URL="https://go.dev/dl/${GO_TARBALL}"
+                        
+                        # Clean up any existing partial downloads
+                        rm -f ${GO_TARBALL}
+                        
+                        echo "Downloading from: ${GO_URL}"
+                        if ! curl -fsSL -o ${GO_TARBALL} ${GO_URL}; then
+                            echo "Failed to download Go from ${GO_URL}"
+                            exit 1
+                        fi
+                        
+                        # Verify download size (should be > 50MB)
+                        FILE_SIZE=$(stat -c%s ${GO_TARBALL} 2>/dev/null || stat -f%z ${GO_TARBALL})
+                        if [ ${FILE_SIZE} -lt 50000000 ]; then
+                            echo "Downloaded file is too small (${FILE_SIZE} bytes), likely an error page"
+                            rm -f ${GO_TARBALL}
+                            exit 1
+                        fi
+                        
+                        echo "Downloaded ${FILE_SIZE} bytes, extracting..."
+                        rm -rf /usr/local/go
+                        tar -C /usr/local -xzf ${GO_TARBALL}
+                        rm ${GO_TARBALL}
+                    fi
+                    
+                    go version
+                    go env
+                '''
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo '📥 Installing Go dependencies...'
+                sh '''
+                    go mod download
+                    go mod verify
+                    echo "✅ Dependencies installed successfully"
+                '''
+            }
+        }
+        
+        stage('Static Code Analysis') {
+            steps {
+                echo '🔍 Running static code analysis...'
+                sh '''
+                    # Install golangci-lint if not present
+                    if ! command -v golangci-lint &> /dev/null; then
+                        echo "Installing golangci-lint ${GOLANGCI_LINT_VERSION}..."
+                        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v${GOLANGCI_LINT_VERSION}
+                    fi
+                    
+                    echo "Running golangci-lint..."
+                    golangci-lint --version
+                    golangci-lint run --timeout 5m ./...
+                    
+                    echo "Running go vet..."
+                    go vet ./...
+                    
+                    echo "Running go fmt check..."
+                    UNFORMATTED=$(gofmt -l .)
+                    if [ -n "$UNFORMATTED" ]; then
+                        echo "❌ The following files are not formatted:"
+                        echo "$UNFORMATTED"
+                        exit 1
+                    fi
+                    
+                    echo "✅ Static code analysis passed"
+                '''
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                echo '🔨 Building Go application...'
+                sh '''
+                    echo "Building ${PROJECT_NAME} version ${BUILD_NUMBER}..."
+                    
+                    # Create bin directory
+                    mkdir -p bin
+                    
+                    # Build with version information
+                    VERSION="${BUILD_NUMBER}"
+                    COMMIT=$(git rev-parse --short HEAD)
+                    BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+                    
+                    go build -v \
+                        -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=${BUILD_TIME}" \
+                        -o bin/${PROJECT_NAME} \
+                        ./cmd/webapp
+                    
+                    echo "✅ Build completed successfully!"
+                    ls -lh bin/${PROJECT_NAME}
+                '''
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                echo '🧪 Running tests...'
+                script {
+                    // Run tests and capture exit code
+                    def testExitCode = sh(script: '''
+                        set +e
+                        
+                        echo "Running unit tests with coverage..."
+                        
+                        # Install go-junit-report for JUnit XML generation
+                        if ! command -v go-junit-report &> /dev/null; then
+                            echo "Installing go-junit-report..."
+                            go install github.com/jstemmer/go-junit-report/v2@latest
+                        fi
+                        
+                        # Run tests and save output
+                        go test -v -coverprofile=coverage.out -covermode=atomic ./... > test-output.txt 2>&1
+                        TEST_EXIT=$?
+                        
+                        # Display test output
+                        cat test-output.txt
+                        
+                        exit $TEST_EXIT
+                    ''', returnStatus: true)
+                    
+                    // Generate JUnit XML report (always, even if tests failed)
+                    sh 'cat test-output.txt | go-junit-report -set-exit-code > test-report.xml || true'
+                    
+                    // Publish test results (always)
+                    junit allowEmptyResults: false, testResults: 'test-report.xml'
+                    
+                    // Generate coverage reports
+                    sh '''
+                        echo ""
+                        echo "Coverage summary:"
+                        go tool cover -func=coverage.out || echo "No coverage data"
+                        
+                        # Generate HTML coverage report
+                        go tool cover -html=coverage.out -o coverage.html || echo "Failed to generate HTML coverage"
+                    '''
+                    
+                    // Fail the stage if tests failed
+                    if (testExitCode != 0) {
+                        error("Tests failed with exit code ${testExitCode}")
+                    }
+                }
+            }
+        }
+        
+        stage('Create Artifacts') {
+            steps {
+                echo '📦 Creating deployment artifacts...'
+                sh '''
+                    mkdir -p artifacts
+                    
+                    # Copy binary
+                    cp bin/${PROJECT_NAME} artifacts/
+                    
+                    # Create comprehensive version file
+                    cat > artifacts/build-info.json << EOF
+{
+  "project": "${PROJECT_NAME}",
+  "build": "${BUILD_NUMBER}",
+  "commit": "$(git rev-parse --short HEAD)",
+  "branch": "$(git branch --show-current || echo 'detached HEAD')",
+  "buildTime": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "goVersion": "$(go version | awk '{print $3}')"
+}
+EOF
+                    
+                    # Create deployment script
+                    cat > artifacts/run.sh << 'EOF'
+#!/bin/bash
+export PORT=8090
+echo "🚀 Starting ${PROJECT_NAME}..."
+echo "📍 Application will be available at: http://localhost:$PORT"
+./${PROJECT_NAME}
+EOF
+                    chmod +x artifacts/run.sh
+                    
+                    # Copy coverage reports
+                    cp coverage.out coverage.html artifacts/ 2>/dev/null || true
+                    
+                    # Create tarball with timestamp
+                    ARTIFACT_NAME="${PROJECT_NAME}-${BUILD_NUMBER}-$(date +%Y%m%d-%H%M%S).tar.gz"
+                    tar -czf "artifacts/${ARTIFACT_NAME}" \
+                        -C artifacts \
+                        ${PROJECT_NAME} build-info.json run.sh coverage.out coverage.html 2>/dev/null || \
+                    tar -czf "artifacts/${ARTIFACT_NAME}" \
+                        -C artifacts \
+                        ${PROJECT_NAME} build-info.json run.sh
+                    
+                    echo "✅ Artifacts created successfully!"
+                    echo ""
+                    echo "📋 Artifact contents:"
+                    ls -lh artifacts/
+                    echo ""
+                    echo "📦 Archive: ${ARTIFACT_NAME}"
+                    tar -tzf "artifacts/${ARTIFACT_NAME}"
+                '''
+            }
+        }
+        
+        stage('Archive Artifacts') {
+            steps {
+                echo '💾 Archiving build artifacts...'
+                archiveArtifacts artifacts: 'artifacts/**/*', 
+                                fingerprint: true, 
+                                allowEmptyArchive: false
+                
+                echo '✅ Artifacts archived in Jenkins'
+                echo 'Download artifacts from: ${BUILD_URL}artifact/'
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+            echo ''
+            echo '📊 Build Summary:'
+            echo "Build Number: ${BUILD_NUMBER}"
+            echo "Status: ${currentBuild.currentResult}"
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+            echo 'Check the logs above for error details.'
+        }
+        unstable {
+            echo '⚠️ Pipeline completed with warnings'
+        }
+        always {
+            script {
+                echo '🧹 Cleaning up...'
+                echo "Build ${BUILD_NUMBER} finished with status: ${currentBuild.currentResult}"
+            }
+        }
+    }
+}
